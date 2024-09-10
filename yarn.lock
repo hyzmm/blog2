@@ -2162,6 +2162,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@gitgraph/core@npm:1.5.0":
+  version: 1.5.0
+  resolution: "@gitgraph/core@npm:1.5.0"
+  checksum: e8387d2048134953fe1956e9543dc1b685b38054c0a9c53e7367f4f664c07ec1dd5ad1a17693c9735c85cd037f90f7d70125d5fe9c77fb0d7f0fc3f44e9597ee
+  languageName: node
+  linkType: hard
+
+"@gitgraph/react@npm:^1.6.0":
+  version: 1.6.0
+  resolution: "@gitgraph/react@npm:1.6.0"
+  dependencies:
+    "@gitgraph/core": 1.5.0
+  peerDependencies:
+    react: ">= 16.8.0"
+  checksum: daf0a7d5d4fbe3b93350503bea51de85731308a1dcfcb5761ea701ccfcf467b2858d71e5929d0d658c1418f225f5a9b7898825b4eaf222417cdfb43a92c40923
+  languageName: node
+  linkType: hard
+
 "@grpc/grpc-js@npm:^1.7.1":
   version: 1.10.6
   resolution: "@grpc/grpc-js@npm:1.10.6"
@@ -10905,6 +10923,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "tailwind-nextjs-starter-blog@workspace:."
   dependencies:
+    "@gitgraph/react": ^1.6.0
     "@headlessui/react": 1.7.19
     "@next/bundle-analyzer": 14.2.3
     "@svgr/webpack": ^8.0.1
