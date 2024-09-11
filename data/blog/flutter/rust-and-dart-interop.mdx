@@ -1,0 +1,617 @@
+---
+title: 'Rust 与 Dart 的数据交互'
+date: 2022-10-19
+tags: ['rust', 'dart']
+summary: '本文主要讲解 Dart 与 Rust 的数据交换，不关心 Rust 与多端的集成配置，关于如何将 Rust 项目与各原生平台集成参见「Rust 与 Flutter 混合开发」。因此本文不是基于 Flutter 进行演示，而是使用 Dart 项目。 '
+---
+
+<TOCInline toc={props.toc} asDisclosure />
+
+> 与本文相关系列的文章阅读顺序
+>
+> 1. [Rust 与 Flutter 混合开发](../rust/hybrid-rust-and-flutter)
+> 2. **Rust 与 Dart 的数据交互（本文）**
+
+> 本文主要讲解 Dart 与 Rust 的数据交换，不关心 Rust 与多端的集成配置，关于如何将 Rust 项目与各原生平台集成参见 [Rust 与 Flutter 混合开发](https://hyzmm.github.io/post/hybrid-rust-and-flutter)。因此本文不是基于 Flutter 进行演示，而是使用 Dart 项目。
+
+> 本文的示例代码能够使用 `ffi` 生成，在实际项目中也应该使用这种方式。但是为了更简洁以便于演示，文中的代码是手动编写的，和自动生成的代码有些差异。
+
+# 开始
+
+本节会创建 Rust 和 Dart 项目，并进行准备设置。准备一个空文件夹，例如名为 _demo_ 的文件夹，进入此文件夹，**后续的操作都会在这里进行**。
+
+## 创建 Rust 项目
+
+在示例根目录创建 Rust 项目：
+
+```shell
+cargo new --lib host
+```
+
+打开 _Cargo.toml_，添加以下内容：
+
+```
+[lib]
+crate-type = ["cdylib"]
+```
+
+后面的代码，我们只会运行在 PC 端，因此只需要动态库就够了。在终端执行 `cargo build` 即可编译，编译产物位于 _host/target/debug_ 目录下。
+
+## 创建 Dart 项目
+
+在示例根目录创建 Dart 项目：
+
+```shell
+dart create guest
+# 添加依赖
+dart pub add path
+```
+
+打开 _bin/main.dart_，删除默认代码，添加以下代码：
+
+```dart
+import 'dart:ffi' as ffi;
+import 'dart:io';
+
+import 'package:path/path.dart' as path;
+
+void main(List<String> arguments) {
+  final dylib = loadLibrary();
+}
+
+ffi.DynamicLibrary loadLibrary() {
+  String libName;
+  if (Platform.isMacOS) {
+    libName = 'libhost.dylib';
+  } else if (Platform.isWindows) {
+    libName = 'libhost.dll';
+  } else {
+    libName = 'libhost.so';
+  }
+  final libraryPath = path.join(
+      Directory.current.path, '..', 'host', 'target', 'debug', libName);
+
+  return ffi.DynamicLibrary.open(libraryPath);
+}
+```
+
+`loadLibrary` 负责在桌面端加载动态库，区分了 Windows、MacOS 和 Linux 三个平台。`main` 函数中执行了此方法。此时运行代码，应该能看到成功运行了，不过终端没有任何输出，这说明动态库加载成功了。
+
+### `ffi.DynamicLibrary`
+
+`loadLibrary` 的返回值是 `ffi.DynamicLibrary` 类型，除了加载库的方法外，`DynamicLibrary` 还有少数几个方法：
+
+1. **`bool providesSymbol(String symbolName)`**
+   用于检查库是否包含指定符号。
+2. **`Pointer<Void> get handle`**
+   用于获取打开动态链接库的 Opaque Handle。类似于 [dlopen(3)](https://man7.org/linux/man-pages/man3/dlopen.3.html) 的返回值。可用于将其作为参数传递给其他 `dlopen` API 的 FFI 调用。
+3. **`Pointer<T> lookup<T extends NativeType>(String symbolName)`**
+   用于查找符号并返回内存地址，如果符号不存在将会抛出错误。类似于系统调用 [dlsym(3)](https://man7.org/linux/man-pages/man3/dlsym.3.html)。
+4. **`F lookupFunction<T extends Function, F extends Function>(...)`**
+   用于查找原生函数并返回一个可调用的 Dart 函数。
+
+`lookupFunction` 是个查找函数的快捷方式，它也可以用 `lookup` 替代。下列的代码是等效的，使用 `lookupFunction` 的方式代码为：
+
+```dart
+typedef NativeFunc = ffi.Void Function();
+typedef DartFunc = void Function();
+
+final dartFunc = dylib.lookupFunction<NativeFunc, DartFunc>('func_name');
+dartFunc();
+```
+
+对应使用 `lookup` 的形式如下所示：
+
+```dart
+typedef NativeFuncPointer = ffi.NativeFunction<ffi.Void Function()>;
+typedef DartFunc = void Function();
+
+final funcPointer = dylib.lookup<NativeFuncPointer>('func_name');
+final dartFunc = funcPointer.asFunction<DartFunc>();
+dartFunc();
+```
+
+# `dart:ffi` 类型
+
+`dart:ffi` 库提供了多种 C 的 [NativeType](https://api.dart.cn/stable/2.18.4/dart-ffi/NativeType-class.html) 表示，一些用于函数签名中的标记，还有一些可被 Dart 实例化。[C interop using dart:ffi](https://dart.dev/guides/libraries/c-interop) 列出了这些类型。
+
+## 可实例化的原生类型
+
+以下原生类型可以用作类型签名中的标记，并且它们（或其子类型）可以在 Dart 代码中实例化：
+
+| **Dart 类型**                                                     | **描述**                         |
+| ----------------------------------------------------------------- | -------------------------------- |
+| [Array](https://api.dart.cn/stable/dart-ffi/Array-class.html)     | 定长数组。特定类型数组的父类型。 |
+| [Pointer](https://api.dart.cn/stable/dart-ffi/Pointer-class.html) | 表示指向原生 C 内存的指针。      |
+| [Struct](https://api.dart.cn/stable/dart-ffi/Struct-class.html)   | 所有 FFI 结构体的父类型。        |
+| [Union](https://api.dart.cn/stable/dart-ffi/Union-class.html)     | 所有 FFI 联合类型的父类型。      |
+
+## 纯标记原生类型
+
+以下是与平台无关的原生类型，它们仅用作类型签名中的标记，并且不能在 Dart 代码中实例化：
+
+| **Dart 类型**                                                                   | **描述**                          |
+| ------------------------------------------------------------------------------- | --------------------------------- |
+| [Bool](https://api.dart.cn/stable/dart-ffi/Bool-class.html)                     | 表示 C 中的本机布尔值。           |
+| [Double](https://api.dart.cn/stable/dart-ffi/Double-class.html)                 | 表示 C 中的本机 64 位双精度。     |
+| [Float](https://api.dart.cn/stable/dart-ffi/Float-class.html)                   | 表示 C 中的原生 32 位浮点数。     |
+| [Int8](https://api.dart.cn/stable/dart-ffi/Int8-class.html)                     | 表示 C 中的本机有符号 8 位整数。  |
+| [Int16](https://api.dart.cn/stable/dart-ffi/Int16-class.html)                   | 表示 C 中的本机有符号 16 位整数。 |
+| [Int32](https://api.dart.cn/stable/dart-ffi/Int32-class.html)                   | 表示 C 中的本机有符号 32 位整数。 |
+| [Int64](https://api.dart.cn/stable/dart-ffi/Int64-class.html)                   | 表示 C 中的本机有符号 64 位整数。 |
+| [NativeFunction](https://api.dart.cn/stable/dart-ffi/NativeFunction-class.html) | 表示 C 中的函数类型。             |
+| [Opaque](https://api.dart.cn/stable/dart-ffi/Opaque-class.html)                 | C 中所有不透明类型的超类型。      |
+| [Uint8](https://api.dart.cn/stable/dart-ffi/Uint8-class.html)                   | 表示 C 中的原生无符号 8 位整数。  |
+| [Uint16](https://api.dart.cn/stable/dart-ffi/Uint16-class.html)                 | 表示 C 中的原生无符号 16 位整数。 |
+| [Uint32](https://api.dart.cn/stable/dart-ffi/Uint32-class.html)                 | 表示 C 中的原生无符号 32 位整数。 |
+| [Uint64](https://api.dart.cn/stable/dart-ffi/Uint64-class.html)                 | 表示 C 中的本机无符号 64 位整数。 |
+| [Void](https://api.dart.cn/stable/dart-ffi/Void-class.html)                     | 表示`void`C 中的类型。            |
+
+# 访问 Rust 数据
+
+上一节的表格中列出了 `dart:ffi` 定义的 C 类型。其中数字类型和布尔等原型类型，Dart 和 Rust 是直接对应的，而字符串和结构体则不是直接对应的。这一节来看看在 Dart 中如何访问 Rust 定义的全局静态变量的。
+
+## 访问原型类型
+
+对于全局的 Rust 静态 `i32` 类型，定义如下：
+
+```rust
+#[no_mangle]
+pub static NUM: i32 = 1024;
+```
+
+代码中的 `NUM` 静态变量将会暴露给 FFI。
+
+> 需要暴露的全局变量需满足以下两个条件：
+>
+> 1. 访问控制必须是公开的，所以修饰符是 `pub`。
+> 2. 添加注解 `#[no_mangle]`，此注解关闭了 Rust 编译器的命名混淆，命名混淆会使编译器修改函数的名字。
+
+运行 `cargo build` 编译动态库，接下来看看 Dart 代码。
+
+```dart
+final ffi.Pointer<ffi.Int32> numPtr = dylib.lookup("NUM").cast<ffi.Int32>();
+print(numPtr.value); // 1024
+```
+
+第一行代码通过 `lookup()` 查找符号，并将类型转换为了 `ffi:Int32`，此时的类型是指向了 `ffi:Int32` 的指针，通过 `Pointer.value` 可以获取其值。
+
+## 访问字符串
+
+字符串不属于原型类型，所以 Dart 并没有 `ffi.String`，在 C 中，字符串是指向 `char` 的指针，在 Rust FFI 中使用原始指针表示，与 C 语言一致。
+
+Rust 提供了 `CString` 和 `CStr` 两个结构体来处理 FFI 字符串，所以我们最容易想到的方式是：
+
+```rust
+#[no_mangle]
+pub static VERSION: *const c_char = CString::new("v0.0.1").unwrap().into_raw();
+```
+
+但是这种方式编译器将提示 `const i8 cannot be shared between threads safely`，所以不能采用这种方式。这种方式放在函数调用中是很便捷的，我们后文会提到，但现在还不是时候。
+
+思考一下，C 语言的字符串的表现形式除了是指向 `char` 的指针，还有一种表现形式是字符数组，而定长的字符数组是编译时确定大小的，在 Rust 中也是合法的静态全局变量。所以我们可以换成这种形式：
+
+```rust
+#[no_mangle]
+pub static VERSION: &[u8] = b"v0.0.1\0";
+```
+
+现在的 `VERSION` 是一个 `&[u8; 7]` 类型，上面的代码用了类型推导，所以省略了长度，省的我们去数字符数。C 语言的字符串是 **Null-terminated string**，所以千万**不能忘了末尾的** `\0`，否则你会得到一个不知道有多长的字符串，直到在内存中碰到了 `\0`。
+
+运行 `cargo build` 编译动态库，接下来继续看 Dart 代码。
+
+字符串本质上是指向字符的指针，这一点可以从 C 语言的类型 `char*` 上看出，所以在 Dart 的表示中，它的类型是 `ffi.Pointer<ffi.Int8>`，Dart 核心库并没有提供便捷的 FFI String 操作，而是在 [ffi package](https://pub.dev/packages/ffi) 中提供了 `Utf8` 类型。首先添加依赖：
+
+```shell
+dart pub add ffi
+```
+
+`Utf8` 提供了 Dart String 和 UTF-8 以及 UTF-16 格式的 C String 的互相转换，它对 `String` 和 `Pointer` 类型添加了扩展，对于将指针转换为 Dart 字符串的情况，`Utf8` 在 `Pointer` 提供了 `toDartString()` 扩展。我们通过它能够在 Dart 中取得字符串：
+
+```rust
+final ffi.Pointer<ffi.Pointer<ffi.Uint8>> version =
+	dylib.lookup("VERSION").cast<ffi.Pointer<ffi.Uint8>>();
+print(version.value.cast<Utf8>().toDartString());
+```
+
+这里也需要注意和原型类型的差异，`lookup().cast<T>` 返回的是指向 `T` 的指针，而字符串本身就是指向字符的指针，即 `T` 为 `Pointer<ffi.Uint8>`，所以 `version` 的类型是 `ffi.Pointer<ffi.Pointer<ffi.Uint8>>`。在取值时先从 `version.value` 获取到 `Pointer<Uint8>`，再将其转换为 `Utf8` 得到返回 `Pointer<Utf8>`，最后调用 `toDartString()` 获取字符串内容。
+
+## 其他全局静态类型
+
+关于其他全局静态类型，例如结构体，数组等，将这些全局静态类型直接暴露给 FFI 很麻烦，也并不是很实用，如果有这种场景可以通过使用 Rust 函数去读写全局静态变量更为合理，而这些变量无需暴露给 FFI。
+
+# 调用 Rust 函数
+
+上面介绍了通过 FFI 访问全局静态变量，本节介绍通过 FFI 访问 Rust 函数，这种方式更为常见。
+
+打开 _lib.rs_，添加一个 `hello_world` 函数：
+
+```rust
+#[no_mangle]
+pub extern "C" fn hello_world() {
+    println!("hello world!");
+}
+```
+
+在 [Rust 与 Flutter 混合开发](https://hyzmm.github.io/post/hybrid-rust-and-flutter) 中也简单提到过如何在 Rust 编写 FFI 接口。
+
+`extern` 关键字的用途之一是用于创建一个可以被其他语言调用的 Rust 接口，后面跟着的 `"C"` 指定使用的 ABI。此外还添加 `#[no_mangle]` 注解关闭 Rust 编译器的命名混淆，此功能会使编译器修改函数的名字。这两个步骤每个要暴露给 FFI 的接口都需要进行的设置。
+
+> 将接口暴露给 FFI 需要满足以下条件：
+>
+> 1. 访问限定为 `pub`
+> 2. 添加 `#[no_mangle]` 注解
+> 3. 添加 `extern "C"` 标记
+
+`hello_world` 的函数签名是最简单的一类，没有入参，没有返回值。
+
+之前有提到 `DynamicLibrary.lookupFunction` 方法，它的完整函数签名是：
+
+```dart
+external F lookupFunction<T extends Function, F extends Function>(
+    String symbolName,
+    {bool isLeaf: false},
+);
+```
+
+它有两个泛型参数，第一个是符号的原生函数签名，第二个对应的 Dart 函数签名。
+
+运行 `cargo build` 构建动态库。对于 Rust 提供的 `hello_world` 方法，在 Dart 中就是这样调用的：
+
+```dart
+final helloWorld =
+    dylib.lookupFunction<ffi.Void Function(), void Function()>('hello_world');
+helloWorld();
+```
+
+运行代码，可以在终端看到一行输出内容：`hello world!`。
+
+## 传递原型类型
+
+如果一个函数带有参数，将实参传递过去也需要分多种情况。最简单的一种情况是传递类型是原型类型，如数字类型，布尔值。例如一个计算加法的 Rust 函数是：
+
+```rust
+#[no_mangle]
+pub extern "C" fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+```
+
+运行 `cargo build` 构建动态库。Dart 的调用代码是：
+
+```dart
+final add = dylib.lookupFunction<ffi.Int32 Function(ffi.Int32, ffi.Int32),
+    int Function(int, int)>("add");
+print(add(1, 2)); // 3
+```
+
+之前我们提到过，Dart 中的整型值 `int` 不区分位数，可直接对应到 C 的 8 位、16 位和 32 位整型值。同理，Dart 的 `double` 类型可对应到 C 的单精度和双精度浮点数。
+
+## 传递字符串
+
+另一种常见的数据类型就是字符串，一个连接字符串的 Rust 函数代码是：
+
+```rust
+#[no_mangle]
+pub extern "C" fn concat(a: *const c_char, b: *const c_char) ->*mut c_char {
+    let a = unsafe { CStr::from_ptr(a) };
+    let b = unsafe { CStr::from_ptr(b) };
+    let a = a.to_str().unwrap();
+    let b = b.to_str().unwrap();
+    let c = format!("{}{}", a, b);
+    CString::new(c).unwrap().into_raw()
+}
+```
+
+这里的字符串就没有使用上一节用的常量字符数组了，因为这里的生命周期不在静态空间，可以直接使用 Rust 提供的 `CString ` 与 `CStr` 用于与 C 字符串交互，当然在函数签名上需要遵守 C 的规则，使用 `*const c_char` 类型。Rust 字符串和 C 字符串的规则不一致，例如 Rust 使用 UTF8 编码，而 C 字符串有多种编码，或是 C 字符串是 Null-Terminated String，而 Rust String 不是。
+
+`CStr` 之于 `CString` 犹如 `&str` 之于 `String`。`CStr` 是一段字符串切片，不拥有所有权，`CString` 拥有所有权。因此将 Rust String 转换为 C String 会用到 `CString`，将 C String 转换为 Rust String 会用到 `CStr`，更多可以参考 [Rust FFI](https://doc.rust-lang.org/std/ffi/index.html) 文档。
+
+由于 Rust 使用 UTF-8 字符串，上例使用 `CStr.to_str()` 获取 Rust 的字符切片，这要求来源数据必须是 UTF-8，由于调用方是 Dart，所以这一点可以保证。
+
+运行 `cargo build` 构建动态库。接下来看下 Dart 代码。
+
+在前面介绍过了 `ffi` package，用到了 `Pointer` 扩展中指针到 Dart String 的转换能力，如果有点不记得，可以跳转到「访问字符串」一节回顾一下 。反向的转换则是对 `String` 类型扩展了名为 `toNativeUtf8()` 的方法，将 Dart 字符串转换为 `Pointer<Utf8>`。Rust `concat` 在 Dart 的调用代码如下：
+
+```dart
+typedef ConcatSignature = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<Utf8>, ffi.Pointer<Utf8>);
+
+...
+
+final concat =
+    dylib.lookupFunction<ConcatSignature, ConcatSignature>("concat");
+final strPtr1 = "hello".toNativeUtf8();
+final strPtr2 = " world".toNativeUtf8();
+final resultPtr = concat(strPtr1, strPtr2);
+print(resultPtr.toDartString()); // hello world
+```
+
+和之前不一样的是，字符串的 C 函数签名和 Dart 函数签名的参数类型都是 `ffi.Pointer<Utf8>`，所以代码中使用 `typedef` 进行了通用的类型定义。
+
+### 内存回收
+
+从上面的 Rust 和 Dart 代码可以看出，示例代码存在两处内存泄漏：
+
+1. Rust `concat` 接收的内存是 Dart 代码中 `"string".toNativeUtf8()` 分配的，`toNativeUtf8()` 实际上是使用 `malloc` 分配的原生内存。
+2. Rust `concat` 返回的字符串是 Rust 分配的内存，通过 `CString.into_raw()`，Rust 不再拥有所有权。
+
+这两种情况所描述的内存都不会自动释放。对于第一种情况，在使用完 `strPtr1` 和 `strPtr2` 之后，就可以调用 `free` 方法释放了：
+
+```dart
+final strPtr1 = "hello".toNativeUtf8();
+final strPtr2 = " world".toNativeUtf8();
+final resultPtr = concat(strPtr1, strPtr2);
+
+// 添加两行 free 代码
+malloc.free(strPtr1);
+malloc.free(strPtr2);
+
+print(resultPtr.toDartString()); // hello world
+```
+
+对于第二种情况，由 Rust 分配的内存，应由 Rust 完成释放，这需要新增一个用于释放内存的接口：
+
+```rust
+#[no_mangle]
+pub extern "C" fn free_string(s: *mut c_char) {
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        let _ = CString::from_raw(s);
+    }
+}
+```
+
+实际上是就是调用 `CString::from_raw` 取回了所有权，接下来在 Rust 所有权机制下，离开了作用域，内存会自动释放。
+
+在 Dart 代码最后新增代码：
+
+```dart
+final freeString = dylib.lookupFunction<ffi.Void Function(ffi.Pointer<Utf8>),
+    void Function(ffi.Pointer<Utf8>)>("free_string");
+freeString(resultPtr);
+```
+
+## 传递结构体
+
+除了常用的原型类型和字符串，应用开发中，数据类型更多可能是复杂的结构体，例如在 Rust 中定义 `Address` 简单结构体和 `Person` 嵌套结构体：
+
+```rust
+#[repr(C)]
+pub struct Address {
+    city: *const c_char,
+    street: *const c_char,
+}
+
+#[repr(C)]
+pub struct Person {
+    name: *const c_char,
+    age: u8,
+    address: Address,
+}
+```
+
+`Adress` 结构体有两个字符串字段，而 `Person` 的字段类型包含了数字、字符串和嵌套结构体。
+
+这里我们看到了一个新的注解 `#[repr(C)]`，**reps** 的全称是 **representation**。`#[repr(C)` 会使结构体的字段顺序、大小和对齐方式全部使用 C/C++ 的规则。
+
+> 期望暴露给 FFI 的结构体需满足以下规则：
+>
+> 1. 访问限定为 pub
+>
+> 2. 为结构体添加 `#[repr(C)]` 注解
+
+这个结构体对应的 Dart 类代码如下所示：
+
+```dart
+class Address extends ffi.Struct {
+  external ffi.Pointer<Utf8> city;
+
+  external ffi.Pointer<Utf8> street;
+}
+
+class Person extends ffi.Struct {
+  external ffi.Pointer<Utf8> name;
+
+  @ffi.Uint8()
+  external int age;
+
+  external Address address;
+}
+```
+
+对于 FFI 结构体类型，都需要继承 `ffi.Struct`，并且声明字段对应底层的原生结构体。声明在 `ffi.Struct` 子类的字段，会自动被赋予 `getter` 和 `setting`，用于读写原生内存。
+
+`Struct` 子类中声明的字段有几种限制的类型，可以是 `int`或 `double`，并使用 `NativeType` 进行标注，也可以是指针类型或是其他 FFI 结构体。
+
+`Struct` 子类的所有字段都要加上 `external` 标记。此类无法被实例化，而仅仅是被指向一段原生内存或类型化数据。
+
+我们希望随时能创建 `Person` 结构体，在 Rust 中提供创建 `Person` 结构体的代码，暴露给 Dart 调用：
+
+```rust
+#[no_mangle]
+pub extern "C" fn create_person(name: *const c_char, age: u8, city: *const c_char, street: *const c_char) -> *mut Person {
+    Box::into_raw(Box::new(Person {
+        name,
+        age,
+        address: Address {
+            city,
+            street,
+        },
+    }))
+}
+```
+
+我们使用 `Box::new` 从堆上分配内存，然后使用 `Box::into_raw` 将其转换为原始指针，这样这块内存就不会被自动释放了。
+
+运行 `cargo build` 构建动态库。Dart 中的 `createPerson` 如下所示：
+
+```dart
+typedef CreatePersonNative = ffi.Pointer<Person> Function(
+    ffi.Pointer<Utf8>, ffi.Int32, ffi.Pointer<Utf8>, ffi.Pointer<Utf8>);
+typedef CreatePersonDart = ffi.Pointer<Person> Function(
+    ffi.Pointer<Utf8>, int, ffi.Pointer<Utf8>, ffi.Pointer<Utf8>);
+...
+
+final createPerson = dylib
+    .lookupFunction<CreatePersonNative, CreatePersonDart>('create_person');
+```
+
+现在就可以在 Dart 中创建 `Person` 了：
+
+```dart
+final author = createPerson(
+  'WX'.toNativeUtf8(),
+  27,
+  'Shen Zhen'.toNativeUtf8(),
+  'Yue Hai'.toNativeUtf8(),
+);
+
+final author = authorPtr.ref;
+final name = author.name.toDartString();
+final age = author.age;
+final city = author.address.city.toDartString();
+final street = author.address.street.toDartString();
+print("My name is $name, I'm $age years old, I live in $city $street street");
+// My name is WX, I'm 27 years old, I live in Shen Zhen Yue Hai street
+```
+
+甚至可以在 Dart 代码中直接修改内存中的值：
+
+```dart
+author.age = 28;
+author.name = "Xiang".toNativeUtf8();
+
+// print again
+// My name is Xiang, I'm 28 years old, I live in Shen Zhen Yue Hai street
+```
+
+### 内存回收
+
+上面的示例代码中，第二部分的「在 Dart 中直接修改内存中的值」，由于新的 `name` 使用的 Dart 分配的原生内存，旧的 `name` 此时已经泄漏了，此处只要在赋值前，使用之前 「传递字符串 - 内存回收」中介绍的 `free_string` 即可。
+
+这里还有一种情况，即如果这个 Person 结构体已经结束了它的生命周期，应该如何销毁？其实这一点和「传递字符串 - 内存回收」中 `CString` 的做法类似，我们需要重新取回那段内存的所有权：
+
+```rust
+#[no_mangle]
+pub extern "C" fn free_person(person: *mut Person) {
+    if person.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Box::from_raw(person);
+    }
+}
+```
+
+`Box::from_raw` 取回了 `Box::into_raw` 时转让的所有权，接下来在 Rust 所有权机制下，离开了作用域，内存会自动释放。
+
+## 定长数组
+
+可变长度数组在 C 语言中并不是语言层面支持的，但是其他多数编程语言都支持更易于使用的可变长数组，包括 C++ 支持的 `std::vector`，对应于 Rust 中的 `std::Vec`，以及 Dart 中的 `List`。
+
+由于 FFI 遵循 C 的规范，所以 FFI 也没有可变长度数组，`dart:ffi` 提供了 `Array` 类，用来表示 C 的数组。从 `dart:Array` 的文档上看，这个类是作为 `ffi:Struct` 的字段标记，例如下列的 Rust 代码：
+
+```rust
+#[repr(C)]
+pub struct Foo {
+    bar: [i32; 3],
+}
+```
+
+对应的 Dart 代码如下：
+
+```dart
+class Foo extends ffi.Struct {
+  @ffi.Array(3)
+  external ffi.Array<ffi.Int32> bar;
+}
+```
+
+定长数组的长度在字段标记中被置顶为 3，对应于 Rust 中的长度。
+
+## 不透明类型（Opaque Type）
+
+不透明类型可以使 Dart 无需关心原生内存具体是什么类型，就可以直接被使用。假如一个结构体无法在库使用者所使用的语言中被表达时，这非常有用。
+
+例如一个邮编系统，在 Rust 中是使用 `HashMap` 管理邮编的，但是 `HashMap` 并不是 FFI 支持的类型，此时可以将此类型标记为不透明类型。
+
+```rust
+#[repr(C)]
+pub struct ZipCodes {
+    pub codes: HashMap<&'static str, u32>,
+}
+
+impl ZipCodes {
+    fn new() -> ZipCodes {
+        let mut zip_codes = HashMap::new();
+        zip_codes.insert("ShenZhen", 51800);
+        ZipCodes {
+            codes: zip_codes,
+        }
+    }
+}
+```
+
+我们不需要直接在 Dart 中直接访问 `ZipCodes`，只需要能够拿到邮编就行了，因此我们开放了 FFI API：
+
+```rust
+#[no_mangle]
+pub extern fn init_zipcodes() -> *mut ZipCodes {
+    Box::into_raw(Box::new(ZipCodes::new()))
+}
+
+#[no_mangle]
+pub extern fn get_zip_code(zip_codes: *mut ZipCodes, city: *const c_char) -> u32 {
+    let zip_codes = unsafe { &mut *zip_codes };
+    let city = unsafe { CStr::from_ptr(city).to_str().unwrap() };
+    zip_codes.codes.get(city).cloned().unwrap_or_default()
+}
+```
+
+这两个接口，一个用于初始化，一个用于获取邮编。在 Dart 中为不透明类型定义一个 class：
+
+```dart
+class ZipCodes extends ffi.Opaque {}
+```
+
+剩余的代码之前就都已经见到过了。
+
+```dart
+typedef InitZipcodes = ffi.Pointer<ZipCodes> Function();
+
+...
+
+final getZipCode = dylib.lookupFunction<
+    ffi.Uint32 Function(ffi.Pointer<ZipCodes>, ffi.Pointer<Utf8>),
+    int Function(ffi.Pointer<ZipCodes>, ffi.Pointer<Utf8>)>('get_zip_code');
+
+final zipCodes = initZipcodes();
+final cityPtr = 'ShenZhen'.toNativeUtf8();
+final zipCode = getZipCode(zipCodes, cityPtr);
+malloc.free(cityPtr);
+print(zipCode); // 518000
+```
+
+我们无需在 Dart 侧定义一个 `HashMap`，实际上也做不到，但是在隐藏 `HashMap` 的情况下，也依然能够获取到邮编。
+
+# 内存回收
+
+之前，在「传递字符串」和「传递结构体」中，我们说明了如何在对应的情况下管理内存。总结一下，在 Rust + Dart 中几种内存分配和释放：
+
+1. Dart 实例化的对象由 Dart VM 自动管理内存。
+2. Dart FFI 通过 `ffi.calloc.allocate` 或者 `ffi.malloc.allocate` 分配的原生内存，由对应的 `ffi.calloc.free` 或者 `ffi.malloc.free` 手动释放。
+3. Rust 本有所有权机制负责内存释放，但是暴露给 FFI 的内存需要允许内存泄漏，所以与 FFI API 相关的内存需要手动释放。
+
+# 接下来
+
+我们之前编写的代码，基本上都能使用 `ffi` 自动生成，避免手动维护 FFI API。从上文也能看出，对于可变长度数组和 Map 之前的数据结构并不是天然支持的，如果要去支持就要自己维护一些序列化和反序列化逻辑。另外还有一个方案是 `flutter_rust_bridge` 使用的 Rust create [allo-isolate](https://github.com/sunshine-protocol/allo-isolate)，它能够利用 Send Port 在 Rust 多线程和 Dart Isolate 之间传递数据，并且支持更高级的数据类型。
+
+# 参考资料
+
+- [C interop using dart:ffi](https://dart.dev/guides/libraries/c-interop)
+- [High-level memory-safe binding generator for Flutter/Dart \<-\> Rust](https://cjycode.com/flutter_rust_bridge/)
+- [Alternative representations](https://doc.rust-lang.org/nomicon/other-reprs.html#alternative-representations)
+- [The Rust FFI Omnibus](http://llever.com/rust-ffi-omnibus/)
